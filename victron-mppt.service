@@ -1,0 +1,33 @@
+[Unit]
+Description=Victron MPPT MQTT Publisher
+After=network.target bluetooth.service
+Wants=network-online.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=alex
+Group=alex
+WorkingDirectory=/home/alex/victron
+Environment=PATH=/home/alex/victron/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/uv run main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables (you'll need to set these)
+# Environment=MPPT_MAC_ADDRESS=da6fe96f94ce
+# Environment=ENCRYPTION_KEY=your_encryption_key_here
+# Environment=MQTT_USER=your_mqtt_user
+# Environment=MQTT_PASSWORD=your_mqtt_password
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/alex/victron
+
+[Install]
+WantedBy=multi-user.target
