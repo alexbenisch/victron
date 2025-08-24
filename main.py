@@ -6,19 +6,24 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
 
+from dotenv import load_dotenv
 from victron_ble.devices import Device
 from victron_ble.scanner import Scanner
 import paho.mqtt.client as mqtt
 
-logging.basicConfig(level=logging.INFO)
+load_dotenv()
+
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
 class VictronMPPTReader:
     def __init__(self):
+        # Note: MPPT_MAC_ADDRESS should be the device identifier (e.g., from victron-ble command)
+        # Format: "763aeff5-1334-e64a-ab30-a0f478s20fe1" (not a standard BLE MAC address)
         self.mac_address = os.getenv('MPPT_MAC_ADDRESS')
         self.encryption_key = os.getenv('ENCRYPTION_KEY')
-        self.mqtt_host = "homeassistant.fritz.box"
+        self.mqtt_host = os.getenv("MQTT_HOST")
         self.mqtt_user = os.getenv('MQTT_USER')
         self.mqtt_password = os.getenv('MQTT_PASSWORD')
         self.device: Optional[Device] = None
@@ -31,9 +36,11 @@ class VictronMPPTReader:
         try:
             logger.info(f"Connecting to MPPT at {self.mac_address}")
             
-            # Create scanner with device keys - normalize MAC address to colon-separated lowercase format
-            normalized_mac = ':'.join(self.mac_address[i:i+2] for i in range(0, len(self.mac_address), 2)).lower()
-            device_keys = {normalized_mac: self.encryption_key}
+            # Create scanner with device keys - format as proper BLE MAC address
+            # Convert device identifier to BLE MAC format (DA:6F:E9:6F:94:CE)
+            formatted_mac = ':'.join(self.mac_address[i:i+2] for i in range(0, len(self.mac_address), 2)).upper()
+            device_keys = {formatted_mac: self.encryption_key}
+            logger.info(f"Using device key: {formatted_mac} -> {self.encryption_key[:8]}...")
             scanner = Scanner(device_keys)
             
             # Set up a flag to track if device is found
@@ -41,15 +48,17 @@ class VictronMPPTReader:
             
             # Override the callback to capture our device
             def custom_callback(ble_device, raw_data):
-                logger.info(f"Discovered device: {ble_device.address} (target: {self.mac_address})")
-                # Normalize MAC addresses for comparison (remove colons and convert to lowercase)
-                device_mac = ble_device.address.replace(':', '').lower()
-                target_mac = self.mac_address.replace(':', '').lower()
-                if device_mac == target_mac:
-                    logger.info(f"Found target device: {ble_device.address}")
-                    self.device = scanner.get_device(ble_device, raw_data)
-                    self.raw_data = raw_data  # Store raw data for parsing
-                    self.device_found = True
+                logger.info(f"Discovered device: {ble_device.address}")
+                # Try to get device using the scanner (it will match against our device_keys)
+                try:
+                    device = scanner.get_device(ble_device, raw_data)
+                    if device:
+                        logger.info(f"Found matching device: {ble_device.address}")
+                        self.device = device
+                        self.raw_data = raw_data  # Store raw data for parsing
+                        self.device_found = True
+                except Exception as e:
+                    logger.debug(f"Device {ble_device.address} not matching: {e}")
             
             scanner.callback = custom_callback
             
@@ -107,13 +116,32 @@ class VictronMPPTReader:
             parsed_data = self.device.parse(self.raw_data)
             if parsed_data:
                 logger.info("Successfully read MPPT data")
+                logger.debug(f"Parsed data type: {type(parsed_data)}")
+                logger.debug(f"Parsed data attributes: {[attr for attr in dir(parsed_data) if not attr.startswith('_')]}")
+                
                 # Convert the parsed data object to dictionary
                 data_dict = {}
                 for attr_name in dir(parsed_data):
                     if not attr_name.startswith('_'):
-                        value = getattr(parsed_data, attr_name)
-                        if not callable(value):
-                            data_dict[attr_name] = value
+                        attr_value = getattr(parsed_data, attr_name)
+                        if callable(attr_value) and attr_name.startswith('get_'):
+                            # Call the getter method to get the actual value
+                            try:
+                                value = attr_value()
+                                field_name = attr_name[4:]  # Remove 'get_' prefix
+                                # Convert enum values to strings for JSON serialization
+                                if hasattr(value, 'name'):
+                                    value = value.name  # Use enum name (e.g., 'FLOAT' instead of OperationMode.FLOAT)
+                                elif hasattr(value, 'value'):
+                                    value = value.value  # Use enum value if no name
+                                data_dict[field_name] = value
+                                logger.debug(f"  {field_name}: {value}")
+                            except Exception as e:
+                                logger.debug(f"  Error calling {attr_name}: {e}")
+                        elif not callable(attr_value):
+                            # Include non-callable attributes
+                            data_dict[attr_name] = attr_value
+                            logger.debug(f"  {attr_name}: {attr_value}")
                 
                 return {
                     'timestamp': datetime.now().isoformat(),
@@ -189,8 +217,8 @@ async def main():
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         logger.error("Please set the following environment variables:")
-        logger.error("- MPPT_MAC_ADDRESS")
-        logger.error("- ENCRYPTION_KEY")
+        logger.error("- MPPT_MAC_ADDRESS (device identifier, e.g., '763aeff5-1334-e64a-ab30-a0f478s20fe1')")
+        logger.error("- ENCRYPTION_KEY (32-character hex key)")
         logger.error("- MQTT_USER")
         logger.error("- MQTT_PASSWORD")
     except Exception as e:
