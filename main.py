@@ -156,7 +156,7 @@ class VictronMPPTReader:
         if not self.mqtt_client or not data:
             return
         
-        base_topic = "victron/mppt150_45"
+        base_topic = "homeassistant/victron"
         
         for key, value in data.items():
             if value is not None:
